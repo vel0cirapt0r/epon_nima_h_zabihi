@@ -79,20 +79,20 @@ def plot_panels4(df: pd.DataFrame, out_path: str) -> None:
 
 
 def plot_3d(df: pd.DataFrame, out_path: str) -> None:
-    # Axes: X -> T_max_ms (1,2,5,10), Y -> rho_total (0.2..1.0), Z -> idle_ratio_pct
-    tmax_unique = sorted({float(x) for x in df["T_max_ms"].unique()})
+    # Axes: X -> rho_total (0.2..1.0), Y -> T_max_ms (10,5,2,1), Z -> idle_ratio_pct
     rho_unique = sorted({float(x) for x in df["rho_total"].unique()})
-    nt, nr = len(tmax_unique), len(rho_unique)
+    tmax_unique = sorted({float(x) for x in df["T_max_ms"].unique()}, reverse=True)
+    nr, nt = len(rho_unique), len(tmax_unique)
 
-    # Build Z values in row-major order: for each rho, iterate over all tmax
+    # Build Z values in row-major order: for each tmax, iterate over all rho
     top_vals: list[float] = []
-    for r in rho_unique:
-        for t in tmax_unique:
+    for t in tmax_unique:
+        for r in rho_unique:
             v = df[(df["rho_total"] == r) & (df["T_max_ms"] == t)]["idle_ratio_pct"].iloc[0]
             top_vals.append(float(v))
     top = np.array(top_vals, dtype=float)
 
-    _xx, _yy = np.meshgrid(range(nt), range(nr))  # shapes (nr, nt)
+    _xx, _yy = np.meshgrid(range(nr), range(nt))  # shapes (nt, nr)
     x, y = _xx.ravel(), _yy.ravel()
     z0 = np.zeros_like(top)
     dx = dy = 0.8
@@ -101,24 +101,25 @@ def plot_3d(df: pd.DataFrame, out_path: str) -> None:
     ax = fig.add_subplot(111, projection="3d")
 
     norm = Normalize(vmin=float(top.min()), vmax=float(top.max()))
-    colors = cm.viridis(norm(top))
+    colors = cm.jet(norm(top))
     ax.bar3d(x, y, z0, dx, dy, top, shade=True, color=colors)
 
-    ax.set_xticks(range(nt))
-    ax.set_xticklabels([str(int(t)) for t in tmax_unique])
-    ax.set_xlabel("Maximum cycle length [ms]")
+    ax.set_xticks(range(nr))
+    ax.set_xticklabels([f"{r:.1f}" for r in rho_unique])
+    ax.set_xlabel("ONUs load")
 
-    ax.set_yticks(range(nr))
-    ax.set_yticklabels([f"{r:.1f}" for r in rho_unique])
-    ax.set_ylabel("ONUs load")
+    ax.set_yticks(range(nt))
+    ax.set_yticklabels([str(int(t)) for t in tmax_unique])
+    ax.set_ylabel("Maximum cycle length [ms]")
 
     ax.set_zlabel("Average idle ratio [%]")
-    ax.set_zlim(0, 45)
+    ax.set_zlim(0, 50)
+    ax.set_zticks(range(0, 51, 10))
 
-    sm = cm.ScalarMappable(cmap=cm.viridis, norm=norm)
+    sm = cm.ScalarMappable(cmap=cm.jet, norm=norm)
     sm.set_array([])
-    cbar = fig.colorbar(sm, ax=ax, shrink=0.5, aspect=5)
-    cbar.set_label("Average idle ratio [%]")
+    cbar = fig.colorbar(sm, ax=ax, shrink=0.6, aspect=30, orientation='horizontal', location='top')
+    cbar.set_ticks(range(0, 41, 5))
 
     plt.tight_layout()
     fig.savefig(out_path, dpi=160)
