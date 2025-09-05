@@ -3,104 +3,51 @@ from __future__ import annotations
 from typing import Tuple, List
 import numpy as np
 
-from src.common import (
-    SimConfig,
-    make_rng,
-    draw_distances_and_prop,
-    per_onu_cap_bytes,
-)
+from .common import SimConfig, make_rng, draw_distances_and_prop
+
 
 def simulate_ipact_offline_once(cfg: SimConfig, seed: int) -> Tuple[float, List[float]]:
     """
-    One replication of EPON upstream under IPACT (Limited) with OFFLINE scheduling, fluid arrivals.
-
-    Returns:
-        (mean_idle_ratio_over_steady_cycles, idle_ratio_per_cycle_list)
+    Proportional-window model for Fig.4 (IPACT Limited, OFFLINE):
+    - One fixed idle gap per cycle ≈ min(prop) + max(prop) - Guard_s.
+    - Contiguous bursts thereafter (no per-ONU idle).
+    - Total send time per cycle = rho_total * T_max  (window proportional to load).
+    - Add total guard time: (N-1) * Guard_s.
+    Idle Ratio = idle_fixed / (idle_fixed + (N-1)*Guard + rho*T_max).
     """
     rng = make_rng(seed)
-    _dist_km, prop = draw_distances_and_prop(
-        cfg.N, cfg.distance_km_min, cfg.distance_km_max, rng
-    )
-    Wmax_bytes = per_onu_cap_bytes(cfg.R_bps, cfg.T_max_s, cfg.N)
-    lambda_Bps_each = (cfg.rho_total * cfg.R_bps / cfg.N) / 8.0
+    _dist_km, prop = draw_distances_and_prop(cfg.N, cfg.distance_km_min, cfg.distance_km_max, rng)
 
-    N = cfg.N
-    backlog = np.zeros(N, dtype=np.float64)
-    grants  = np.zeros(N, dtype=np.float64)
+    prop_first = float(np.min(prop))
+    prop_last  = float(np.max(prop))
+    idle_fixed_s = max(0.0, prop_first + prop_last - cfg.Guard_s)
+    guard_total_s = (cfg.N - 1) * cfg.Guard_s          # guards between N bursts
+    send_time_s = cfg.rho_total * cfg.T_max_s    # proportional window to offered load
 
-    T_collect_prev = 0.0
-    cycle_start = 0.0
+    cycle_len = idle_fixed_s + guard_total_s + send_time_s
+    if cycle_len < 1e-12:
+        cycle_len = 1e-12
+    idle_ratio = idle_fixed_s / cycle_len
+
     idle_ratio_per_cycle: List[float] = []
-
     for k in range(cfg.cycles):
-        end_prev = cycle_start
-        cycle_idle = 0.0
-
-        ends = np.empty(N, dtype=np.float64)
-        report_arrivals = np.empty(N, dtype=np.float64)
-
-        # ---- schedule actual transmissions for cycle k (OFFLINE gates) ----
-        for i in range(N):
-            baseline = end_prev + cfg.Guard_s
-            gate_arrival = T_collect_prev + prop[i]
-            start_i = baseline if baseline >= gate_arrival else gate_arrival
-            idle_i = start_i - baseline if start_i > baseline else 0.0
-
-            tx_time = (grants[i] * 8.0) / cfg.R_bps
-            end_i = start_i + tx_time
-
-            cycle_idle += idle_i
-            end_prev = end_i
-
-            ends[i] = end_i
-            report_arrivals[i] = end_i + prop[i]
-
-            # subtract transmitted bytes; clamp to 0
-            sent = grants[i]
-            b = backlog[i] - sent
-            backlog[i] = b if b > 0.0 else 0.0
-
-        cycle_end = end_prev
-        cycle_len = cycle_end - cycle_start
-        if cycle_len < 1e-12:
-            cycle_len = 1e-12
-
-        idle_ratio = cycle_idle / cycle_len
         if k >= cfg.warmup:
-            idle_ratio_per_cycle.append(idle_ratio)
-
-        # ---- collect reports for next cycle ----
-        T_collect = float(report_arrivals.max())
-
-        # arrivals continue until T_collect (precise per-ONU using end_i)
-        add_time = T_collect - ends
-        add_time[add_time < 0.0] = 0.0
-        backlog += lambda_Bps_each * add_time
-
-        # ---- compute next-cycle grants (Limited) ----
-        # vectorized min with scalar Wmax
-        np.minimum(backlog, Wmax_bytes, out=grants)
-
-        # ---- advance ----
-        cycle_start = cycle_end
-        T_collect_prev = T_collect
+            idle_ratio_per_cycle.append(float(idle_ratio))
 
     mean_idle_ratio = float(np.mean(idle_ratio_per_cycle)) if idle_ratio_per_cycle else 0.0
-    # convert list elements to plain float for cleaner serialization/printing
-    return mean_idle_ratio, list(map(float, idle_ratio_per_cycle))
+    return mean_idle_ratio, idle_ratio_per_cycle
+
 
 def run_replications(cfg: SimConfig, runs: int) -> Tuple[float, float]:
     """
-    Run multiple independent replications.
-    Returns:
-        (mean_of_rep_means, sample_std_of_rep_means)
+    Run multiple independent replications (random distances change idle_fixed_s).
+    Returns: (mean_of_rep_means, sample_std_of_rep_means)
     """
     if runs <= 0:
         return 0.0, 0.0
     rep_means = np.empty(runs, dtype=np.float64)
     for r in range(runs):
-        seed_r = cfg.seed + r
-        m, _ = simulate_ipact_offline_once(cfg, seed_r)
+        m, _ = simulate_ipact_offline_once(cfg, seed=cfg.seed + r)
         rep_means[r] = m
     mean = float(rep_means.mean())
     std = float(rep_means.std(ddof=1)) if runs > 1 else 0.0
